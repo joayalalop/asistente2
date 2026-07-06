@@ -6,18 +6,18 @@ from sklearn.metrics.pairwise import cosine_similarity
 import streamlit as st
 import torch
 
-# 0. OPTIMIZACIÓN DE HARDWARE PARA NUBE GRATUITA (Evita que Linux congele la CPU)
+# 0. OPTIMIZACIÓN DE HARDWARE: Limita los hilos de CPU para que Linux no sature el contenedor
 torch.set_num_threads(1)
 
 # 1. CONFIGURACIÓN DE LA PÁGINA
 st.set_page_config(
-    page_title="Asistente CPC - ENESEM (V3.1 Cloud)", layout="wide"
+    page_title="Asistente CPC - ENESEM (V3.2 Cloud)", layout="wide"
 )
 
 
 # 2. FUNCIÓN DE NORMALIZACIÓN LINGÜÍSTICA
 def normalizar_glosa(texto):
-    """Limpia puntuación, espacios y conectores ('Y', 'DE', 'EN') para un Match Exacto flexible."""
+    """Limpia puntuación y conectores ('Y', 'DE', 'EN') para asegurar Match Exacto."""
     if not texto or pd.isna(texto):
         return ""
     t = str(texto).upper().strip()
@@ -29,16 +29,16 @@ def normalizar_glosa(texto):
     return t
 
 
-# 3. FUNCIONES CON CACHÉ (Modelos ligeros y carga optimizada)
-@st.cache_resource
+# 3. CARGA DE MODELO Y CATÁLOGO OFICIAL (En caché permanente)
+@st.cache_resource(show_spinner=False)
 def cargar_modelo():
-    # MODELO OPTIMIZADO PARA NUBE: Consume mitad de RAM y es 3x más rápido
+    # Modelo compacto MiniLM: Mitad de RAM y 3x más rápido en servidores de nube
     return SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
 
 
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def cargar_catalogo_oficial():
-    """Carga cpc.xlsx en memoria para consultar descripciones técnicas."""
+    """Carga cpc.xlsx en memoria únicamente para consultar descripciones oficiales."""
     try:
         df_cpc = pd.read_excel("cpc.xlsx", sheet_name=0)
         col_cod = [
@@ -65,95 +65,62 @@ def cargar_catalogo_oficial():
         return {}
 
 
-@st.cache_data
-def cargar_y_desagregar_datos():
-    """Carga los Excel limpios y separa las glosas históricas para evitar dilución semántica."""
-    df_com = pd.read_excel("diccionario_cpc_comercio_limpio.xlsx").fillna("")
-    df_ser = pd.read_excel("diccionario_cpc_servicios_limpio.xlsx").fillna("")
-    df_mp = pd.read_excel(
-        "diccionario_cpc_materias_primas_limpio.xlsx"
-    ).fillna("")
-    df_prod = pd.read_excel("diccionario_cpc_productos_limpio.xlsx").fillna("")
+# 4. CARGA MODULAR Y DESAGREGADA INDIVIDUAL (Cero colapso de RAM en el arranque)
+@st.cache_data(show_spinner=False)
+def cargar_modulo_desagregado(nombre_archivo, es_comercio=False):
+    """Carga SOLO el archivo Excel que el crítico está consultando en ese momento."""
+    df = pd.read_excel(nombre_archivo).fillna("")
 
-    def desagregar_modulo(df, es_comercio=False):
-        filas_exp = []
-        for _, row in df.iterrows():
-            cod = row["CODIGO_CPC"]
-            ciiu = row["CIIU_ASOCIADO"]
-            historial_completo = row["EJEMPLOS_REALES_LIMPIOS"]
-            glosas = str(historial_completo).split(" || ")
-            for g in glosas:
-                g_clean = g.strip()
-                if g_clean:
-                    if es_comercio:
-                        tipo = row["TIPO_COMERCIO"]
-                        filas_exp.append({
-                            "CODIGO_CPC": cod,
-                            "CIIU_ASOCIADO": ciiu,
-                            "TIPO_COMERCIO": tipo,
-                            "EJEMPLOS_REALES_LIMPIOS": historial_completo,
-                            "GLOSA_INDIVIDUAL": g_clean,
-                            "TEXTO_A_VECTORIZAR": f"COMERCIO {tipo}: {g_clean}",
-                        })
-                    else:
-                        filas_exp.append({
-                            "CODIGO_CPC": cod,
-                            "CIIU_ASOCIADO": ciiu,
-                            "EJEMPLOS_REALES_LIMPIOS": historial_completo,
-                            "GLOSA_INDIVIDUAL": g_clean,
-                            "TEXTO_A_VECTORIZAR": g_clean,
-                        })
-        return pd.DataFrame(filas_exp)
+    filas_exp = []
+    dict_exacto = {}
 
-    df_com_exp = desagregar_modulo(df_com, es_comercio=True)
-    df_ser_exp = desagregar_modulo(df_ser)
-    df_mp_exp = desagregar_modulo(df_mp)
-    df_prod_exp = desagregar_modulo(df_prod)
+    for _, row in df.iterrows():
+        cod = row["CODIGO_CPC"]
+        ciiu = row["CIIU_ASOCIADO"]
+        historial_completo = row["EJEMPLOS_REALES_LIMPIOS"]
 
-    dict_ex_com = {}
-    for _, row in df_com.iterrows():
-        glosas = str(row["EJEMPLOS_REALES_LIMPIOS"]).split(" || ")
+        glosas = str(historial_completo).split(" || ")
         for g in glosas:
-            g_norm = normalizar_glosa(g)
-            if g_norm:
-                dict_ex_com[(g_norm, row["TIPO_COMERCIO"])] = (
-                    row["CODIGO_CPC"],
-                    row["EJEMPLOS_REALES_LIMPIOS"],
-                )
+            g_clean = g.strip()
+            g_norm = normalizar_glosa(g_clean)
 
-    def crear_dict_ex(df):
-        d = {}
-        for _, row in df.iterrows():
-            glosas = str(row["EJEMPLOS_REALES_LIMPIOS"]).split(" || ")
-            for g in glosas:
-                g_norm = normalizar_glosa(g)
-                if g_norm:
-                    d[g_norm] = (
-                        row["CODIGO_CPC"],
-                        row["EJEMPLOS_REALES_LIMPIOS"],
-                    )
-        return d
+            if g_clean:
+                if es_comercio:
+                    tipo = row["TIPO_COMERCIO"]
+                    filas_exp.append({
+                        "CODIGO_CPC": cod,
+                        "CIIU_ASOCIADO": ciiu,
+                        "TIPO_COMERCIO": tipo,
+                        "EJEMPLOS_REALES_LIMPIOS": historial_completo,
+                        "GLOSA_INDIVIDUAL": g_clean,
+                        "TEXTO_A_VECTORIZAR": f"COMERCIO {tipo}: {g_clean}",
+                    })
+                    if g_norm:
+                        dict_exacto[(g_norm, tipo)] = (cod, historial_completo)
+                else:
+                    filas_exp.append({
+                        "CODIGO_CPC": cod,
+                        "CIIU_ASOCIADO": ciiu,
+                        "EJEMPLOS_REALES_LIMPIOS": historial_completo,
+                        "GLOSA_INDIVIDUAL": g_clean,
+                        "TEXTO_A_VECTORIZAR": g_clean,
+                    })
+                    if g_norm:
+                        dict_exacto[g_norm] = (cod, historial_completo)
 
-    return (
-        df_com_exp,
-        df_ser_exp,
-        df_mp_exp,
-        df_prod_exp,
-        dict_ex_com,
-        crear_dict_ex(df_ser),
-        crear_dict_ex(df_mp),
-        crear_dict_ex(df_prod),
-    )
+    df_expanded = pd.DataFrame(filas_exp)
+    return df_expanded, dict_exacto
 
 
-# CÁLCULO BAJO DEMANDA (Lazy Loading): Solo calcula el bloque cuando se busca por primera vez
 @st.cache_data(show_spinner=False)
 def obtener_vectores(_modelo, df_subconjunto):
+    """Vectorización matemática bajo demanda."""
     return _modelo.encode(
         df_subconjunto["TEXTO_A_VECTORIZAR"].tolist(), show_progress_bar=False
     )
 
 
+# FUNCIÓN TRADUCTORA A DESCRIPCIÓN OFICIAL
 def get_desc_oficial(codigo_hybrid, largo_codigo, mapa_cpc):
     cod_str = str(codigo_hybrid).zfill(largo_codigo)
     cpc_puro = cod_str[-4:] if largo_codigo == 8 else cod_str[-9:]
@@ -171,26 +138,10 @@ def get_desc_oficial(codigo_hybrid, largo_codigo, mapa_cpc):
     return "Definición técnica según Clasificador Central de Productos (CPC 2.0)"
 
 
-# 4. INTERFAZ VISUAL PRINCIPAL
+# 5. INTERFAZ VISUAL PRINCIPAL (Arranque instantáneo en 0.5 segundos)
 st.title("🛡️ Motor de Codificación Asistida CPC")
-st.subheader("Versión 3.1 Cloud — Arquitectura Lider en Eficiencia")
+st.subheader("Versión 3.2 Cloud — Arquitectura Modular Segura")
 st.markdown("Herramienta NLP de la Encuesta Estructural Empresarial - ENESEM")
-
-# Arranque ligero (Ya no precalcula vectores masivos de golpe)
-with st.spinner("Inicializando motor de Inteligencia Artificial..."):
-    modelo = cargar_modelo()
-    mapa_oficial = cargar_catalogo_oficial()
-    (
-        df_comercio,
-        df_servicios,
-        df_mat_primas,
-        df_productos,
-        dict_ex_com,
-        dict_ex_ser,
-        dict_ex_mp,
-        dict_ex_prod,
-    ) = cargar_y_desagregar_datos()
-
 st.write("---")
 
 with st.sidebar:
@@ -212,12 +163,13 @@ with st.sidebar:
         st.error("El código CIIU debe contener 4 números.")
 
 
-# 5. LÓGICA DE BÚsqueda Y DEDUPLICACIÓN
-def mostrar_sugerencias(
+# 6. LÓGICA DE EVALUACIÓN Y DEDUPLICACIÓN
+def procesar_y_mostrar(
     df_modulo, glosa_input, largo_codigo, es_comercio=False
 ):
-    # Aquí se ejecuta la vectorización bajo demanda sin saturar la RAM inicial
-    with st.spinner("Calculando similitud semántica en tiempo real..."):
+    with st.spinner("Consultando motor semántico IA y vectorizando..."):
+        modelo = cargar_modelo()
+        mapa_oficial = cargar_catalogo_oficial()
         vectores_modulo = obtener_vectores(modelo, df_modulo)
         vector_consulta = modelo.encode([glosa_input])
         similitudes = cosine_similarity(vector_consulta, vectores_modulo)[0]
@@ -293,7 +245,7 @@ def mostrar_sugerencias(
             )
 
 
-# 6. PESTAÑAS DE LA INTERFAZ
+# 7. PESTAÑAS DE LA INTERFAZ
 tab_com, tab_ser, tab_mp, tab_prod = st.tabs([
     "🏪 Comercio",
     "🛠️ Servicios",
@@ -318,13 +270,16 @@ with tab_com:
         "Buscar Código CPC - Comercio", type="primary", key="btn_com"
     ):
         if glosa_comercio:
+            with st.spinner("Cargando módulo de Comercio..."):
+                df_mod, dict_ex = cargar_modulo_desagregado(
+                    "diccionario_cpc_comercio_limpio.xlsx", es_comercio=True
+                )
+                mapa_of = cargar_catalogo_oficial()
+
             glosa_norm = normalizar_glosa(glosa_comercio)
-            if (glosa_norm, tipo_comercio) in dict_ex_com:
-                codigo_ex, ejemplos_ex = dict_ex_com[(
-                    glosa_norm,
-                    tipo_comercio,
-                )]
-                desc_ex = get_desc_oficial(codigo_ex, 8, mapa_oficial)
+            if (glosa_norm, tipo_comercio) in dict_ex:
+                cod_ex, hist_ex = dict_ex[(glosa_norm, tipo_comercio)]
+                desc_ex = get_desc_oficial(cod_ex, 8, mapa_of)
                 st.success(
                     "🎯 MATCH EXACTO HISTÓRICO ENCONTRADO EN " + tipo_comercio
                 )
@@ -332,18 +287,20 @@ with tab_com:
                     label="Confianza", value="100%", delta="Asignación Directa"
                 )
                 st.info(
-                    f"**Código Asignado (8 dígitos):** `{str(codigo_ex).zfill(8)}`"
-                    f" \n\n 📖 **Descripción Oficial (CPC 2.0):** {desc_ex} \n\n"
-                    f" 🏢 **Historial de Glosas:** {ejemplos_ex}"
+                    f"**Código Asignado (8 dígitos):** `{str(cod_ex).zfill(8)}` \n\n"
+                    f" 📖 **Descripción Oficial (CPC 2.0):** {desc_ex} \n\n 🏢"
+                    f" **Historial de Glosas:** {hist_ex}"
                 )
             else:
                 st.warning("Buscando aproximaciones mediante NLP...")
-                idx_filt = df_comercio[
-                    df_comercio["TIPO_COMERCIO"] == tipo_comercio
+                idx_filt = df_mod[
+                    df_mod["TIPO_COMERCIO"] == tipo_comercio
                 ].index.tolist()
-                df_sub = df_comercio.loc[idx_filt].reset_index(drop=True)
-                mostrar_sugerencias(
-                    df_sub, glosa_comercio, largo_codigo=8, es_comercio=True
+                procesar_y_mostrar(
+                    df_mod.loc[idx_filt].reset_index(drop=True),
+                    glosa_comercio,
+                    largo_codigo=8,
+                    es_comercio=True,
                 )
         else:
             st.error("Por favor, ingrese una descripción.")
@@ -360,22 +317,27 @@ with tab_ser:
         "Buscar Código CPC - Servicios", type="primary", key="btn_ser"
     ):
         if glosa_servicios:
+            with st.spinner("Cargando módulo de Servicios..."):
+                df_mod, dict_ex = cargar_modulo_desagregado(
+                    "diccionario_cpc_servicios_limpio.xlsx"
+                )
+                mapa_of = cargar_catalogo_oficial()
+
             glosa_norm = normalizar_glosa(glosa_servicios)
-            if glosa_norm in dict_ex_ser:
-                codigo_ex, ejemplos_ex = dict_ex_ser[glosa_norm]
-                desc_ex = get_desc_oficial(codigo_ex, 8, mapa_oficial)
+            if glosa_norm in dict_ex:
+                cod_ex, hist_ex = dict_ex[glosa_norm]
+                desc_ex = get_desc_oficial(cod_ex, 8, mapa_of)
                 st.success("🎯 MATCH EXACTO HISTÓRICO ENCONTRADO")
                 st.info(
-                    f"**Código Asignado (8 dígitos):** `{str(codigo_ex).zfill(8)}`"
-                    f" \n\n 📖 **Descripción Oficial (CPC 2.0):** {desc_ex} \n\n"
-                    f" 🏢 **Historial de Glosas:** {ejemplos_ex}"
+                    f"**Código Asignado (8 dígitos):** `{str(cod_ex).zfill(8)}` \n\n"
+                    f" 📖 **Descripción Oficial (CPC 2.0):** {desc_ex} \n\n 🏢"
+                    f" **Historial de Glosas:** {hist_ex}"
                 )
             else:
                 st.warning(
-                    "Buscando aproximaciones semánticas en la base de"
-                    " Servicios..."
+                    "Buscando aproximaciones semánticas en Servicios..."
                 )
-                mostrar_sugerencias(df_servicios, glosa_servicios, largo_codigo=8)
+                procesar_y_mostrar(df_mod, glosa_servicios, largo_codigo=8)
         else:
             st.error("Por favor, ingrese una descripción.")
 
@@ -391,24 +353,27 @@ with tab_mp:
         "Buscar Código CPC - Materias Primas", type="primary", key="btn_mp"
     ):
         if glosa_mp:
+            with st.spinner("Cargando módulo de Materias Primas..."):
+                df_mod, dict_ex = cargar_modulo_desagregado(
+                    "diccionario_cpc_materias_primas_limpio.xlsx"
+                )
+                mapa_of = cargar_catalogo_oficial()
+
             glosa_norm = normalizar_glosa(glosa_mp)
-            if glosa_norm in dict_ex_mp:
-                codigo_ex, ejemplos_ex = dict_ex_mp[glosa_norm]
-                desc_ex = get_desc_oficial(codigo_ex, 13, mapa_oficial)
+            if glosa_norm in dict_ex:
+                cod_ex, hist_ex = dict_ex[glosa_norm]
+                desc_ex = get_desc_oficial(cod_ex, 13, mapa_of)
                 st.success("🎯 MATCH EXACTO HISTÓRICO ENCONTRADO")
                 st.info(
-                    f"**Código Asignado (13 dígitos):** `{str(codigo_ex).zfill(13)}`"
+                    f"**Código Asignado (13 dígitos):** `{str(cod_ex).zfill(13)}`"
                     f" \n\n 📖 **Descripción Oficial (CPC 2.0):** {desc_ex} \n\n"
-                    f" 🏢 **Historial de Glosas:** {ejemplos_ex}"
+                    f" 🏢 **Historial de Glosas:** {hist_ex}"
                 )
             else:
                 st.warning(
-                    "Buscando aproximaciones semánticas en glosas"
-                    " individuales..."
+                    "Buscando aproximaciones semánticas en Materias Primas..."
                 )
-                mostrar_sugerencias(
-                    df_mat_primas, glosa_mp, largo_codigo=13
-                )
+                procesar_y_mostrar(df_mod, glosa_mp, largo_codigo=13)
         else:
             st.error("Por favor, ingrese una descripción.")
 
@@ -422,23 +387,26 @@ with tab_prod:
         "Buscar Código CPC - Productos", type="primary", key="btn_prod"
     ):
         if glosa_prod:
+            with st.spinner("Cargando módulo de Productos..."):
+                df_mod, dict_ex = cargar_modulo_desagregado(
+                    "diccionario_cpc_productos_limpio.xlsx"
+                )
+                mapa_of = cargar_catalogo_oficial()
+
             glosa_norm = normalizar_glosa(glosa_prod)
-            if glosa_norm in dict_ex_prod:
-                codigo_ex, ejemplos_ex = dict_ex_prod[glosa_norm]
-                desc_ex = get_desc_oficial(codigo_ex, 13, mapa_oficial)
+            if glosa_norm in dict_ex:
+                cod_ex, hist_ex = dict_ex[glosa_norm]
+                desc_ex = get_desc_oficial(cod_ex, 13, mapa_of)
                 st.success("🎯 MATCH EXACTO HISTÓRICO ENCONTRADO")
                 st.info(
-                    f"**Código Asignado (13 dígitos):** `{str(codigo_ex).zfill(13)}`"
+                    f"**Código Asignado (13 dígitos):** `{str(cod_ex).zfill(13)}`"
                     f" \n\n 📖 **Descripción Oficial (CPC 2.0):** {desc_ex} \n\n"
-                    f" 🏢 **Historial de Glosas:** {ejemplos_ex}"
+                    f" 🏢 **Historial de Glosas:** {hist_ex}"
                 )
             else:
                 st.warning(
-                    "Buscando aproximaciones semánticas en glosas"
-                    " individuales..."
+                    "Buscando aproximaciones semánticas en Productos..."
                 )
-                mostrar_sugerencias(
-                    df_productos, glosa_prod, largo_codigo=13
-                )
+                procesar_y_mostrar(df_mod, glosa_prod, largo_codigo=13)
         else:
             st.error("Por favor, ingrese una descripción.")
